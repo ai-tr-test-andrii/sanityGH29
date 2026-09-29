@@ -28,10 +28,15 @@ public class CriticalVulnerabilities {
 
         String username = request.getParameter("username");
 
+        // Read database credentials from environment variables so that no secret
+        // is ever embedded in the source code (CWE-259 / CWE-798).
+        String dbUser     = System.getenv("DB_USER");
+        String dbPassword = System.getenv("DB_PASSWORD");
+
         Connection conn = DriverManager.getConnection(
                 "jdbc:mysql://localhost/test",
-                "user",
-                "pass");
+                dbUser,
+                dbPassword);
 
         Statement stmt = conn.createStatement();
 
