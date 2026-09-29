@@ -15,6 +15,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Hashtable;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 public class CriticalVulnerabilities {
@@ -24,15 +25,28 @@ public class CriticalVulnerabilities {
     private static final Set<String> ALLOWED_COMMANDS = Collections.unmodifiableSet(
             new java.util.HashSet<>(Arrays.asList("date", "uptime", "hostname")));
 
+    // Environment variable names for database credentials.
+    // Passwords must never be hardcoded in source code (CWE-547).
+    static final String ENV_DB_URL      = "DB_URL";
+    static final String ENV_DB_USER     = "DB_USER";
+    static final String ENV_DB_PASSWORD = "DB_PASSWORD";
+
     // 1. SQL Injection (High/Critical)
     public void searchUser(HttpServletRequest request) throws Exception {
 
         String username = request.getParameter("username");
 
-        Connection conn = DriverManager.getConnection(
-                "jdbc:mysql://localhost/test",
-                "user",
-                "pass");
+        // Database credentials are read from environment variables at runtime.
+        // Hardcoded passwords in source code violate CWE-547 and expose the
+        // credential to anyone with repository or binary access.
+        String dbUrl      = Objects.requireNonNull(System.getenv(ENV_DB_URL),
+                ENV_DB_URL + " environment variable must be set");
+        String dbUser     = Objects.requireNonNull(System.getenv(ENV_DB_USER),
+                ENV_DB_USER + " environment variable must be set");
+        String dbPassword = Objects.requireNonNull(System.getenv(ENV_DB_PASSWORD),
+                ENV_DB_PASSWORD + " environment variable must be set");
+
+        Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPassword);
 
         Statement stmt = conn.createStatement();
 
