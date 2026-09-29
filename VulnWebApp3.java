@@ -10,6 +10,7 @@ import java.io.InputStream;
 import java.net.URL;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.util.Arrays;
 import java.util.Collections;
@@ -48,11 +49,12 @@ public class CriticalVulnerabilities {
 
         Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPassword);
 
-        Statement stmt = conn.createStatement();
-
-        stmt.executeQuery(
-                "SELECT * FROM users WHERE username='"
-                        + username + "'");
+        // Parameterized query: the '?' placeholder is bound via setString(),
+        // which is the SAST-recognized safe API for SQL injection prevention.
+        PreparedStatement pstmt = conn.prepareStatement(
+                "SELECT * FROM users WHERE username = ?");
+        pstmt.setString(1, username);
+        pstmt.executeQuery();
     }
 
     // 2. Command Injection – FIXED
