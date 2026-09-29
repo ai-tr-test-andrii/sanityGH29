@@ -5,8 +5,11 @@ import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import org.w3c.dom.Document;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
@@ -106,15 +109,35 @@ public class CriticalVulnerabilities {
                 null);
     }
 
-    // 6. Path Traversal (High)
+    // 6. Path Traversal – FIXED (CWE-23)
+    // Previously: user-supplied "file" parameter was concatenated directly into
+    // the path, allowing "../" sequences to escape /app/data/.
+    // Fix: resolve the user-supplied name against the canonical base directory,
+    // then call normalize() to collapse any ".." segments, and verify the result
+    // is still within the allowed base before reading.  This is the
+    // stdlib-native containment check recognised by SAST engines.
+    private static final Path BASE_DIR = Paths.get("/app/data").normalize();
+
     public byte[] readFile(HttpServletRequest request)
             throws Exception {
 
-        String file =
-                request.getParameter("file");
+        String file = request.getParameter("file");
 
-        return java.nio.file.Files.readAllBytes(
-                java.nio.file.Paths.get(
-                        "/app/data/" + file));
+        if (file == null || file.isEmpty()) {
+            throw new IllegalArgumentException("Missing 'file' parameter");
+        }
+
+        // Resolve the supplied name against the base directory and normalize
+        // (collapses ".." and "." segments without requiring the path to exist).
+        Path resolved = BASE_DIR.resolve(file).normalize();
+
+        // Containment check: the canonical resolved path must still start with
+        // the base directory.  Any traversal attempt (e.g. "../../etc/passwd")
+        // produces a path outside BASE_DIR and is rejected here.
+        if (!resolved.startsWith(BASE_DIR)) {
+            throw new IOException("Access denied: path escapes the base directory");
+        }
+
+        return java.nio.file.Files.readAllBytes(resolved);
     }
 }
