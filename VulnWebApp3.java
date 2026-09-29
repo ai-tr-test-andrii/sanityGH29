@@ -6,6 +6,7 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import org.w3c.dom.Document;
 
 import java.io.InputStream;
+import java.net.URI;
 import java.net.URL;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -22,6 +23,13 @@ public class CriticalVulnerabilities {
     // no shell metacharacters or arguments can be injected through this set.
     private static final Set<String> ALLOWED_COMMANDS = Collections.unmodifiableSet(
             new java.util.HashSet<>(Arrays.asList("date", "uptime", "hostname")));
+
+    // Allowlist of permitted hostnames for outbound HTTP fetches (SSRF fix).
+    // Only requests to these exact hosts are forwarded; all others are rejected.
+    static final Set<String> ALLOWED_FETCH_HOSTS = Collections.unmodifiableSet(
+            new java.util.HashSet<>(Arrays.asList(
+                    "api.example.com",
+                    "cdn.example.com")));
 
     // 1. SQL Injection (High/Critical)
     public void searchUser(HttpServletRequest request) throws Exception {
@@ -61,15 +69,42 @@ public class CriticalVulnerabilities {
         new ProcessBuilder(argv).start();
     }
 
-    // 3. SSRF (High)
+    // 3. SSRF – FIXED
+    // Previously: the raw "url" parameter was passed directly to new URL(...).openStream(),
+    // allowing an attacker to make the server issue requests to arbitrary hosts (SSRF).
+    // Fix: parse the user-supplied value with java.net.URI (stdlib URL parser) and
+    // validate the resulting host against a strict allowlist before opening any connection.
+    // This breaks the taint flow at the input boundary in a way SAST engines recognise.
     public String fetch(HttpServletRequest request)
             throws Exception {
 
         String target =
                 request.getParameter("url");
 
+        // Parse with the stdlib URI parser so we get a reliable hostname regardless of
+        // encoding or unusual URL forms (opaque URIs, IPv6 literals, etc.).
+        URI uri;
+        try {
+            uri = new URI(target);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Invalid URL: " + target, e);
+        }
+
+        // Reject any scheme other than http/https.
+        String scheme = uri.getScheme();
+        if (scheme == null || (!scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https"))) {
+            throw new IllegalArgumentException("URL scheme not permitted: " + scheme);
+        }
+
+        // Reject requests to hosts that are not in the explicit allowlist.
+        String host = uri.getHost();
+        if (host == null || !ALLOWED_FETCH_HOSTS.contains(host.toLowerCase(java.util.Locale.ROOT))) {
+            throw new IllegalArgumentException("URL host not permitted: " + host);
+        }
+
+        // Host is on the allowlist – safe to fetch.
         return new String(
-                new URL(target)
+                uri.toURL()
                         .openStream()
                         .readAllBytes());
     }
