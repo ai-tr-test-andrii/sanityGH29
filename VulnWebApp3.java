@@ -3,6 +3,7 @@ import javax.naming.directory.DirContext;
 import javax.naming.directory.InitialDirContext;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
+import org.owasp.esapi.ESAPI;
 import org.w3c.dom.Document;
 
 import java.io.InputStream;
@@ -87,12 +88,22 @@ public class CriticalVulnerabilities {
         return builder.parse(xml);
     }
 
-    // 5. LDAP Injection (High)
+    // 5. LDAP Injection (High) – FIXED
+    // Previously: raw user input was concatenated directly into the LDAP filter
+    // string, allowing an attacker to inject arbitrary LDAP search filter operators
+    // (e.g. "*))(uid=*)(" to bypass authentication or retrieve all entries).
+    // Fix: sanitize the user input at the input boundary using OWASP ESAPI's
+    // encodeForLDAP(), which escapes all LDAP special characters defined by
+    // RFC 4515 (filter value encoding) before the value is embedded in the filter.
     public void ldapSearch(HttpServletRequest request)
             throws Exception {
 
         String user =
                 request.getParameter("user");
+
+        // Sanitize at input boundary: escape all LDAP special characters so
+        // they are treated as literals, not filter operators, by the LDAP server.
+        String sanitizedUser = ESAPI.encoder().encodeForLDAP(user);
 
         Hashtable<String, String> env =
                 new Hashtable<>();
@@ -102,7 +113,7 @@ public class CriticalVulnerabilities {
 
         ctx.search(
                 "dc=test,dc=com",
-                "(uid=" + user + ")",
+                "(uid=" + sanitizedUser + ")",
                 null);
     }
 
