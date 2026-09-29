@@ -9,7 +9,8 @@ import java.io.InputStream;
 import java.net.URL;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.Statement;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Hashtable;
@@ -23,7 +24,12 @@ public class CriticalVulnerabilities {
     private static final Set<String> ALLOWED_COMMANDS = Collections.unmodifiableSet(
             new java.util.HashSet<>(Arrays.asList("date", "uptime", "hostname")));
 
-    // 1. SQL Injection (High/Critical)
+    // 1. SQL Injection (High/Critical) – FIXED
+    // Previously: Statement.executeQuery() with raw string concatenation → SQL injection.
+    // Fix: use PreparedStatement with a parameterized placeholder (?), so the JDBC
+    // driver binds the username as a typed data value rather than SQL text.
+    // The taint flow from request.getParameter("username") to the database is broken
+    // because PreparedStatement.setString() is a SAST-recognised safe binding API.
     public void searchUser(HttpServletRequest request) throws Exception {
 
         String username = request.getParameter("username");
@@ -33,11 +39,12 @@ public class CriticalVulnerabilities {
                 "user",
                 "pass");
 
-        Statement stmt = conn.createStatement();
-
-        stmt.executeQuery(
-                "SELECT * FROM users WHERE username='"
-                        + username + "'");
+        // Parameterised query: the '?' placeholder is never interpreted as SQL,
+        // so no injected syntax can alter the query structure.
+        PreparedStatement stmt = conn.prepareStatement(
+                "SELECT * FROM users WHERE username = ?");
+        stmt.setString(1, username);
+        ResultSet rs = stmt.executeQuery();
     }
 
     // 2. Command Injection – FIXED
