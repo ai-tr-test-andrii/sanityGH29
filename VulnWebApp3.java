@@ -3,6 +3,7 @@ import javax.naming.directory.DirContext;
 import javax.naming.directory.InitialDirContext;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
+import org.owasp.esapi.ESAPI;
 import org.w3c.dom.Document;
 
 import java.io.InputStream;
@@ -15,6 +16,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Hashtable;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 public class CriticalVulnerabilities {
@@ -24,20 +26,28 @@ public class CriticalVulnerabilities {
     private static final Set<String> ALLOWED_COMMANDS = Collections.unmodifiableSet(
             new java.util.HashSet<>(Arrays.asList("date", "uptime", "hostname")));
 
-    // 1. SQL Injection (High/Critical) – FIXED
-    // Previously: the raw "username" request parameter was concatenated directly
-    // into a SQL string, allowing parameter tampering / SQL injection (CWE-472,
-    // CWE-89).  Fix: use a PreparedStatement with a positional placeholder so
-    // the JDBC driver handles all quoting and escaping; user-supplied data never
-    // touches the SQL grammar.
+    // Environment variable names for database credentials.
+    // Passwords must never be hardcoded in source code (CWE-547).
+    static final String ENV_DB_URL      = "DB_URL";
+    static final String ENV_DB_USER     = "DB_USER";
+    static final String ENV_DB_PASSWORD = "DB_PASSWORD";
+
+    // 1. SQL Injection (High/Critical)
     public void searchUser(HttpServletRequest request) throws Exception {
 
         String username = request.getParameter("username");
 
-        Connection conn = DriverManager.getConnection(
-                "jdbc:mysql://localhost/test",
-                "user",
-                "pass");
+        // Database credentials are read from environment variables at runtime.
+        // Hardcoded passwords in source code violate CWE-547 and expose the
+        // credential to anyone with repository or binary access.
+        String dbUrl      = Objects.requireNonNull(System.getenv(ENV_DB_URL),
+                ENV_DB_URL + " environment variable must be set");
+        String dbUser     = Objects.requireNonNull(System.getenv(ENV_DB_USER),
+                ENV_DB_USER + " environment variable must be set");
+        String dbPassword = Objects.requireNonNull(System.getenv(ENV_DB_PASSWORD),
+                ENV_DB_PASSWORD + " environment variable must be set");
+
+        Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPassword);
 
         // Parameterized query: the '?' placeholder is bound via setString(),
         // which is the SAST-recognized safe API for SQL injection prevention.
@@ -94,12 +104,22 @@ public class CriticalVulnerabilities {
         return builder.parse(xml);
     }
 
-    // 5. LDAP Injection (High)
+    // 5. LDAP Injection (High) – FIXED
+    // Previously: raw user input was concatenated directly into the LDAP filter
+    // string, allowing an attacker to inject arbitrary LDAP search filter operators
+    // (e.g. "*))(uid=*)(" to bypass authentication or retrieve all entries).
+    // Fix: sanitize the user input at the input boundary using OWASP ESAPI's
+    // encodeForLDAP(), which escapes all LDAP special characters defined by
+    // RFC 4515 (filter value encoding) before the value is embedded in the filter.
     public void ldapSearch(HttpServletRequest request)
             throws Exception {
 
         String user =
                 request.getParameter("user");
+
+        // Sanitize at input boundary: escape all LDAP special characters so
+        // they are treated as literals, not filter operators, by the LDAP server.
+        String sanitizedUser = ESAPI.encoder().encodeForLDAP(user);
 
         Hashtable<String, String> env =
                 new Hashtable<>();
@@ -109,7 +129,7 @@ public class CriticalVulnerabilities {
 
         ctx.search(
                 "dc=test,dc=com",
-                "(uid=" + user + ")",
+                "(uid=" + sanitizedUser + ")",
                 null);
     }
 
