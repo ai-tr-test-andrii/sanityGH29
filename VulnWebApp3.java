@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.net.URL;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.util.Arrays;
 import java.util.Collections;
@@ -23,7 +24,12 @@ public class CriticalVulnerabilities {
     private static final Set<String> ALLOWED_COMMANDS = Collections.unmodifiableSet(
             new java.util.HashSet<>(Arrays.asList("date", "uptime", "hostname")));
 
-    // 1. SQL Injection (High/Critical)
+    // 1. SQL Injection (High/Critical) – FIXED
+    // Previously: the raw "username" request parameter was concatenated directly
+    // into a SQL string, allowing parameter tampering / SQL injection (CWE-472,
+    // CWE-89).  Fix: use a PreparedStatement with a positional placeholder so
+    // the JDBC driver handles all quoting and escaping; user-supplied data never
+    // touches the SQL grammar.
     public void searchUser(HttpServletRequest request) throws Exception {
 
         String username = request.getParameter("username");
@@ -33,11 +39,12 @@ public class CriticalVulnerabilities {
                 "user",
                 "pass");
 
-        Statement stmt = conn.createStatement();
-
-        stmt.executeQuery(
-                "SELECT * FROM users WHERE username='"
-                        + username + "'");
+        // Parameterized query: the '?' placeholder is bound via setString(),
+        // which is the SAST-recognized safe API for SQL injection prevention.
+        PreparedStatement pstmt = conn.prepareStatement(
+                "SELECT * FROM users WHERE username = ?");
+        pstmt.setString(1, username);
+        pstmt.executeQuery();
     }
 
     // 2. Command Injection – FIXED
