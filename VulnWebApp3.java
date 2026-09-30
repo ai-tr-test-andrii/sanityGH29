@@ -175,15 +175,33 @@ public class CriticalVulnerabilities {
                 null);
     }
 
-    // 6. Path Traversal (High)
+    // 6. Path Traversal (High) – FIXED (CWE-23)
+    // Previously: user-supplied "file" parameter was concatenated directly onto
+    // the base path and passed to Files.readAllBytes(), allowing an attacker to
+    // traverse outside /app/data/ with sequences such as "../../etc/passwd".
+    // Fix: resolve the candidate path against the base directory, normalize it to
+    // remove any ".." segments, convert to an absolute path, then verify it still
+    // starts with the canonicalized base directory.  This is the stdlib-based,
+    // SAST-recognized containment check for CWE-23 / CWE-22.
+    private static final java.nio.file.Path BASE_DIR =
+            java.nio.file.Paths.get("/app/data").toAbsolutePath().normalize();
+
     public byte[] readFile(HttpServletRequest request)
             throws Exception {
 
-        String file =
-                request.getParameter("file");
+        String file = request.getParameter("file");
 
-        return java.nio.file.Files.readAllBytes(
-                java.nio.file.Paths.get(
-                        "/app/data/" + file));
+        // Resolve, normalize and canonicalize the requested path so that any
+        // ".." or "." components are collapsed before the containment check.
+        java.nio.file.Path resolvedPath =
+                BASE_DIR.resolve(file).normalize().toAbsolutePath();
+
+        // Reject any path that escapes the designated base directory.
+        if (!resolvedPath.startsWith(BASE_DIR)) {
+            throw new SecurityException(
+                    "Access denied: path is outside the permitted directory");
+        }
+
+        return java.nio.file.Files.readAllBytes(resolvedPath);
     }
 }
