@@ -14,17 +14,27 @@ import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
 public class CriticalVulnerabilities {
 
-    // Allowlist of permitted commands. Only exact matches are accepted;
-    // no shell metacharacters or arguments can be injected through this set.
-    private static final Set<String> ALLOWED_COMMANDS = Collections.unmodifiableSet(
-            new java.util.HashSet<>(Arrays.asList("date", "uptime", "hostname")));
+    // Mapping of permitted command names to their absolute, hardcoded paths.
+    // Only keys present in this map are accepted; the value (not the tainted
+    // user input) is what gets passed to ProcessBuilder, so no user-controlled
+    // data ever reaches the process-creation API.
+    private static final Map<String, String> ALLOWED_COMMANDS;
+    static {
+        Map<String, String> m = new HashMap<>();
+        m.put("date",     "/bin/date");
+        m.put("uptime",   "/usr/bin/uptime");
+        m.put("hostname", "/bin/hostname");
+        ALLOWED_COMMANDS = Collections.unmodifiableMap(m);
+    }
 
     // Environment variable names for database credentials.
     // Passwords must never be hardcoded in source code (CWE-547).
@@ -57,24 +67,29 @@ public class CriticalVulnerabilities {
         pstmt.executeQuery();
     }
 
-    // 2. Command Injection – FIXED
+    // 2. Command Injection – FIXED (CWE-77)
     // Previously: Runtime.getRuntime().exec(command) with raw user input → command injection.
-    // Fix: validate "cmd" against a strict allowlist, then execute via ProcessBuilder with an
-    // argv list (no shell involved), so no shell metacharacters can be injected.
+    // Fix: validate "cmd" against a strict allowlist map, then pass the HARDCODED PATH
+    // from the map (not the tainted user input) to ProcessBuilder. The taint chain is
+    // completely broken because the value reaching the process-creation API originates
+    // from a compile-time constant, not from getParameter().
     public void execute(HttpServletRequest request)
             throws Exception {
 
         String command = request.getParameter("cmd");
 
+        // Look up the hardcoded executable path for the requested command name.
+        // Returns null if command is null or not in the allowlist.
+        String executablePath = (command != null) ? ALLOWED_COMMANDS.get(command) : null;
+
         // Reject any value that is not in the hardcoded allowlist.
-        // ProcessBuilder receives the command as a single argv element with no shell,
-        // which is the SAST-recognized safe form for command execution.
-        if (command == null || !ALLOWED_COMMANDS.contains(command)) {
+        if (executablePath == null) {
             throw new IllegalArgumentException("Command not permitted: " + command);
         }
 
-        // Use ProcessBuilder with an argv list – no shell interpolation occurs.
-        List<String> argv = Collections.singletonList(command);
+        // Pass the hardcoded path (a compile-time constant, never tainted) to
+        // ProcessBuilder with an argv list – no shell interpolation occurs.
+        List<String> argv = Collections.singletonList(executablePath);
         new ProcessBuilder(argv).start();
     }
 
