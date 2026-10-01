@@ -7,6 +7,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpSession;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.sql.Connection;
@@ -19,18 +20,26 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
- * Tests for UserController.searchUser() to verify that SQL injection
- * has been remediated via parameterized PreparedStatement queries.
+ * Tests for UserController.searchUser() to verify that:
  *
- * The core security assertion in every test is: the user-supplied username
- * value must reach the database ONLY as a bound parameter (via setString),
- * never as literal SQL text embedded in the query string.
+ * 1. The IDOR / Parameter Tampering vulnerability (CWE-472) is fixed:
+ *    - The query is scoped to the server-side session identity, NOT the
+ *      client-supplied "username" request parameter.
+ *    - Unauthenticated callers are rejected before any database access.
+ *
+ * 2. SQL injection is prevented via parameterized PreparedStatement queries.
+ *
+ * The core security assertion: the value bound to the PreparedStatement
+ * must come from the server-side session, NOT from request.getParameter().
  */
 @ExtendWith(MockitoExtension.class)
 public class UserControllerTest {
 
     @Mock
     private HttpServletRequest request;
+
+    @Mock
+    private HttpSession session;
 
     @Mock
     private Connection connection;
@@ -62,14 +71,158 @@ public class UserControllerTest {
         return driverManagerMock;
     }
 
+    // Helper: set up request with an active session containing an authenticated user.
+    private void setupAuthenticatedSession(String sessionUsername) {
+        when(request.getSession(false)).thenReturn(session);
+        when(session.getAttribute("authenticatedUsername")).thenReturn(sessionUsername);
+    }
+
     // -----------------------------------------------------------------------
-    // Test 1: Normal username — verify a PreparedStatement is used (not a
-    // plain Statement), that the SQL template contains a '?' placeholder, and
-    // that the username is bound via setString rather than concatenated.
+    // IDOR Test 1: Verify that when a client supplies a DIFFERENT username in
+    // the request parameter than the one stored in the session, the query is
+    // executed using the SESSION value, not the request parameter value.
+    // This is the core IDOR / parameter-tampering regression test.
+    // -----------------------------------------------------------------------
+    @Test
+    void testParameterTampering_sessionIdentityUsedNotRequestParam() throws Exception {
+        // Authenticated user in session is "alice".
+        setupAuthenticatedSession("alice");
+
+        // Attacker supplies a different username in the request parameter.
+        when(request.getParameter("username")).thenReturn("bob");
+
+        try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
+            controller.searchUser(request);
+
+            // The prepared statement must be bound with the SESSION identity ("alice"),
+            // NOT the attacker-supplied request parameter ("bob").
+            verify(preparedStatement).setString(1, "alice");
+
+            // Confirm the attacker's username was NOT used.
+            verify(preparedStatement, never()).setString(1, "bob");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // IDOR Test 2: Verify that a user with no active session is rejected
+    // before any database access occurs (no getConnection call made).
+    // -----------------------------------------------------------------------
+    @Test
+    void testNoSession_throwsSecurityException() throws Exception {
+        // No active session.
+        when(request.getSession(false)).thenReturn(null);
+
+        try (MockedStatic<DriverManager> dm = mockStatic(DriverManager.class)) {
+            SecurityException ex = assertThrows(SecurityException.class,
+                    () -> controller.searchUser(request));
+
+            assertTrue(ex.getMessage().contains("authenticated"),
+                    "Exception message should reference authentication requirement");
+
+            // CRITICAL: database must NOT be accessed when session is absent.
+            dm.verifyNoInteractions();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // IDOR Test 3: Verify that a session with no authenticated username
+    // attribute is rejected before any database access occurs.
+    // -----------------------------------------------------------------------
+    @Test
+    void testSessionWithNoAuthenticatedUsername_throwsSecurityException() throws Exception {
+        when(request.getSession(false)).thenReturn(session);
+        when(session.getAttribute("authenticatedUsername")).thenReturn(null);
+
+        try (MockedStatic<DriverManager> dm = mockStatic(DriverManager.class)) {
+            SecurityException ex = assertThrows(SecurityException.class,
+                    () -> controller.searchUser(request));
+
+            assertTrue(ex.getMessage().contains("authenticated"),
+                    "Exception message should reference authentication requirement");
+
+            // CRITICAL: database must NOT be accessed when user identity is missing.
+            dm.verifyNoInteractions();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // IDOR Test 4: Verify that the client-supplied "username" request parameter
+    // is completely ignored — even when no "username" parameter is present, the
+    // authenticated session user can still query their own record.
+    // -----------------------------------------------------------------------
+    @Test
+    void testMissingRequestParam_sessionIdentityIsUsed() throws Exception {
+        setupAuthenticatedSession("charlie");
+
+        // No "username" request parameter supplied at all.
+        when(request.getParameter("username")).thenReturn(null);
+
+        try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
+            // Should succeed because the session provides the identity.
+            assertDoesNotThrow(() -> controller.searchUser(request));
+
+            // The session identity must be bound as the query parameter.
+            verify(preparedStatement).setString(1, "charlie");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SQL Injection Test 5: Verify that an SQL injection payload supplied via
+    // the session (if somehow tainted) is still bound as a parameter, not
+    // concatenated into the SQL template.
+    // -----------------------------------------------------------------------
+    @Test
+    void testSqlInjectionInSessionUsername_isPassedAsParameter() throws Exception {
+        String maliciousInput = "' OR '1'='1";
+        setupAuthenticatedSession(maliciousInput);
+
+        try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
+            controller.searchUser(request);
+
+            ArgumentCaptor<String> queryCaptor = ArgumentCaptor.forClass(String.class);
+            verify(connection).prepareStatement(queryCaptor.capture());
+            String capturedQuery = queryCaptor.getValue();
+
+            // The injection payload must NOT appear in the SQL template string.
+            assertFalse(capturedQuery.contains(maliciousInput),
+                    "Injection payload must not be embedded in the SQL template");
+            assertTrue(capturedQuery.contains("?"),
+                    "SQL template must use a parameterized placeholder '?'");
+
+            // The raw payload is bound safely via setString.
+            verify(preparedStatement).setString(1, maliciousInput);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SQL Injection Test 6: UNION-based injection payload from session value
+    // -----------------------------------------------------------------------
+    @Test
+    void testUnionInjectionInSessionUsername_isPassedAsParameter() throws Exception {
+        String maliciousInput = "admin' UNION SELECT password FROM users--";
+        setupAuthenticatedSession(maliciousInput);
+
+        try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
+            controller.searchUser(request);
+
+            ArgumentCaptor<String> queryCaptor = ArgumentCaptor.forClass(String.class);
+            verify(connection).prepareStatement(queryCaptor.capture());
+            String capturedQuery = queryCaptor.getValue();
+
+            assertFalse(capturedQuery.contains("UNION"),
+                    "UNION keyword from user input must not appear in SQL template");
+            verify(preparedStatement).setString(1, maliciousInput);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SQL Injection Test 7: Normal username — verify a PreparedStatement is
+    // used (not a plain Statement), the SQL template contains a '?' placeholder,
+    // and the username is bound via setString rather than concatenated.
     // -----------------------------------------------------------------------
     @Test
     void testNormalUsername_usesPreparedStatement() throws Exception {
-        when(request.getParameter("username")).thenReturn("alice");
+        setupAuthenticatedSession("alice");
 
         try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
             controller.searchUser(request);
@@ -95,89 +248,13 @@ public class UserControllerTest {
     }
 
     // -----------------------------------------------------------------------
-    // Test 2: Classic SQL injection payload — verify the payload is treated as
-    // a literal string parameter and is NEVER embedded in the SQL template.
-    // -----------------------------------------------------------------------
-    @Test
-    void testSqlInjectionPayload_isPassedAsParameter() throws Exception {
-        String maliciousInput = "' OR '1'='1";
-        when(request.getParameter("username")).thenReturn(maliciousInput);
-
-        try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
-            controller.searchUser(request);
-
-            ArgumentCaptor<String> queryCaptor = ArgumentCaptor.forClass(String.class);
-            verify(connection).prepareStatement(queryCaptor.capture());
-            String capturedQuery = queryCaptor.getValue();
-
-            // The injection payload must NOT appear in the SQL template string.
-            assertFalse(capturedQuery.contains(maliciousInput),
-                    "Injection payload must not be embedded in the SQL template");
-            assertTrue(capturedQuery.contains("?"),
-                    "SQL template must use a parameterized placeholder");
-
-            // The raw payload must be bound safely via setString.
-            verify(preparedStatement).setString(1, maliciousInput);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 3: UNION-based injection payload
-    // -----------------------------------------------------------------------
-    @Test
-    void testUnionInjectionPayload_isPassedAsParameter() throws Exception {
-        String maliciousInput = "admin' UNION SELECT password FROM users--";
-        when(request.getParameter("username")).thenReturn(maliciousInput);
-
-        try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
-            controller.searchUser(request);
-
-            ArgumentCaptor<String> queryCaptor = ArgumentCaptor.forClass(String.class);
-            verify(connection).prepareStatement(queryCaptor.capture());
-            String capturedQuery = queryCaptor.getValue();
-
-            assertFalse(capturedQuery.contains("UNION"),
-                    "UNION keyword from user input must not appear in SQL template");
-            assertFalse(capturedQuery.contains(maliciousInput),
-                    "Injection payload must not be embedded in the SQL template");
-            verify(preparedStatement).setString(1, maliciousInput);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 4: Blank username — verify the system handles it without error.
-    // -----------------------------------------------------------------------
-    @Test
-    void testBlankUsername_doesNotThrow() throws Exception {
-        when(request.getParameter("username")).thenReturn("");
-
-        try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
-            assertDoesNotThrow(() -> controller.searchUser(request));
-            verify(preparedStatement).setString(1, "");
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 5: Null username — verify the system handles null gracefully.
-    // -----------------------------------------------------------------------
-    @Test
-    void testNullUsername_doesNotThrow() throws Exception {
-        when(request.getParameter("username")).thenReturn(null);
-
-        try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
-            assertDoesNotThrow(() -> controller.searchUser(request));
-            verify(preparedStatement).setString(1, null);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 6: Username with special characters — special chars are passed
+    // Test 8: Username with special characters — special chars are passed
     // safely as a parameter without breaking the query.
     // -----------------------------------------------------------------------
     @Test
     void testUsernameWithSpecialChars_isPassedAsParameter() throws Exception {
         String specialUsername = "O'Brien; DROP TABLE users;--";
-        when(request.getParameter("username")).thenReturn(specialUsername);
+        setupAuthenticatedSession(specialUsername);
 
         try (MockedStatic<DriverManager> dm = setupDriverManagerMock()) {
             controller.searchUser(request);
@@ -193,11 +270,8 @@ public class UserControllerTest {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: No hardcoded password literal in source — the class source file
+    // Test 9: No hardcoded password literal in source — the class source file
     // must not contain the known-bad literal "pass" as a credential value.
-    // This test scans the compiled class fields to confirm credentials are NOT
-    // stored as compile-time constants, and inspects the source via reflection
-    // to confirm the static field values originate from System.getenv().
     // -----------------------------------------------------------------------
     @Test
     void testNoHardcodedPasswordInSourceClass() throws Exception {
@@ -216,8 +290,7 @@ public class UserControllerTest {
         // which is only set for primitive/String finals initialized with a literal.
         // Fields initialised with System.getenv() are NOT constant-folded, so they
         // will NOT have the ConstantValue attribute in the bytecode. We verify this
-        // by checking that the field is NOT a compile-time string constant — i.e.,
-        // its value in a static context is not a string literal like "pass".
+        // by checking that the field is NOT a compile-time string constant.
         dbPassField.setAccessible(true);
         Object passValue = dbPassField.get(null);
         // In a test environment without DB_PASS set the field resolves to null.
@@ -228,14 +301,12 @@ public class UserControllerTest {
     }
 
     // -----------------------------------------------------------------------
-    // Test 8: getConnection receives values derived from environment variables,
-    // not the previously hardcoded "pass" literal.
-    // We set DB_PASS to a sentinel value via env-var injection and verify that
-    // value (not the old literal) is forwarded to DriverManager.getConnection.
+    // Test 10: getConnection receives values derived from environment variables,
+    // not a previously hardcoded literal.
     // -----------------------------------------------------------------------
     @Test
     void testGetConnection_usesEnvironmentVariableCredentials() throws Exception {
-        when(request.getParameter("username")).thenReturn("testuser");
+        setupAuthenticatedSession("testuser");
 
         // Capture all three arguments that are forwarded to getConnection.
         ArgumentCaptor<String> urlCaptor  = ArgumentCaptor.forClass(String.class);
