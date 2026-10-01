@@ -61,12 +61,12 @@ public class InfrastructureVulns {
         return builder.parse(xml);
     }
 
-    // 3. Weak Hash (Medium)
-    public byte[] md5(String input)
+    // 3. Strong Hash — replaced broken MD5 with SHA-256 (NIST-approved, CWE-327 fix)
+    public byte[] hash(String input)
             throws Exception {
 
         return MessageDigest
-                .getInstance("MD5")
+                .getInstance("SHA-256")
                 .digest(input.getBytes());
     }
 
