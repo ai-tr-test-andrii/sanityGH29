@@ -81,13 +81,22 @@ public class AdvancedVulnerabilities {
         return in.readObject();
     }
 
-    // 6. Path Traversal (High)
+    // 6. Path Traversal (High) - Fixed: resolve and validate path stays within base dir
     public byte[] readFile(HttpServletRequest request)
             throws Exception {
 
         String file = request.getParameter("file");
 
-        return Files.readAllBytes(
-                Paths.get("/tmp/" + file));
+        // Resolve the requested path against the allowed base directory and
+        // normalize it to eliminate any ".." or "." segments. Then verify the
+        // normalized path still starts with the base directory before reading.
+        java.nio.file.Path baseDir = Paths.get("/tmp").toRealPath();
+        java.nio.file.Path resolvedPath = baseDir.resolve(file).normalize();
+
+        if (!resolvedPath.startsWith(baseDir)) {
+            throw new SecurityException("Access denied: path traversal detected");
+        }
+
+        return Files.readAllBytes(resolvedPath);
     }
 }
