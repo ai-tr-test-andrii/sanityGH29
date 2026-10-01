@@ -205,6 +205,49 @@ public class InfrastructureVulnsTest {
                 "An allowed host must not be rejected by the SSRF allowlist; got: " + thrown);
     }
 
+    /**
+     * Taint-flow reconstruction guard: an allowed-host URL with a port, path, and
+     * query string must be accepted by the allowlist and must not throw SecurityException.
+     * This exercises the URI reconstruction path introduced by the fix — the code
+     * reassembles a new URI from the validated (scheme, host, port, path, query)
+     * components so the tainted user string never reaches the openStream() sink.
+     */
+    @Test
+    void fetchUrl_allowedHostWithPathAndQuery_passesSecurityValidation() {
+        setUrlParam("https://trusted.example.com:443/api/v1/resource?key=value");
+        // Expect a network/IO exception from the unreachable host in the unit-test
+        // environment — but NOT a SecurityException (which would mean the fix
+        // incorrectly rejected a valid, allowlisted URL).
+        Exception thrown = assertThrows(Exception.class, () -> vulns.fetchUrl(mockRequest));
+        assertFalse(thrown instanceof SecurityException,
+                "An allowed host with port/path/query must pass the SSRF allowlist; got: " + thrown);
+    }
+
+    /**
+     * Verify that an attacker cannot bypass the allowlist by appending a path
+     * component that resembles an allowed host (e.g. http://evil.com/trusted.example.com).
+     * java.net.URI.getHost() returns "evil.com" for this URL, so the allowlist must
+     * reject it based on the actual host, not the path.
+     */
+    @Test
+    void ssrf_allowedHostInPath_shouldThrowSecurityException() {
+        setUrlParam("http://evil.com/trusted.example.com/resource");
+        assertThrows(SecurityException.class, () -> vulns.fetchUrl(mockRequest),
+                "Allowed hostname in URL path must not bypass the host allowlist");
+    }
+
+    /**
+     * Verify the IPv6 loopback address [::1] is rejected.
+     * This exercises the path where URI.getHost() returns "[::1]" (with brackets),
+     * which is not on the allowlist.
+     */
+    @Test
+    void ssrf_ipv6Loopback_shouldThrowSecurityException() {
+        setUrlParam("http://[::1]/admin");
+        assertThrows(SecurityException.class, () -> vulns.fetchUrl(mockRequest),
+                "IPv6 loopback address must be blocked");
+    }
+
     // -----------------------------------------------------------------------
     // 6. Weak hash (CWE-327) remediation tests
     //    The md5() method was replaced with hash() which uses SHA-256.
