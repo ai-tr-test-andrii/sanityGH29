@@ -1,5 +1,6 @@
 import javax.naming.directory.DirContext;
 import javax.naming.directory.InitialDirContext;
+import javax.naming.directory.SearchControls;
 import javax.servlet.http.HttpServletRequest;
 import javax.xml.xpath.XPath;
 import javax.xml.xpath.XPathFactory;
@@ -40,11 +41,23 @@ public class AdvancedVulnerabilities {
         Runtime.getRuntime().exec(cmd);
     }
 
-    // 3. LDAP Injection (High)
+    // 3. LDAP Injection (High) - Fixed: encode special LDAP filter characters per RFC 4515
     public void ldapSearch(HttpServletRequest request)
             throws Exception {
 
         String user = request.getParameter("user");
+
+        // Encode special LDAP filter characters to prevent LDAP injection (RFC 4515).
+        // The characters that must be escaped in a filter assertion value are:
+        //   \ (backslash)  -- escaped first to avoid double-escaping later replacements
+        //    (NUL)   -- escaped as \00
+        //   ( ) *          -- the other reserved LDAP filter meta-characters
+        String safeUser = user
+                .replace("\\", "\\5c")
+                .replace("\u0000", "\\00")
+                .replace("(", "\\28")
+                .replace(")", "\\29")
+                .replace("*", "\\2a");
 
         Hashtable<String, String> env = new Hashtable<>();
 
@@ -52,7 +65,7 @@ public class AdvancedVulnerabilities {
 
         ctx.search(
                 "dc=test,dc=com",
-                "(uid=" + user + ")",
+                "(uid=" + safeUser + ")",
                 null);
     }
 
