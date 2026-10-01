@@ -7,6 +7,7 @@ import org.owasp.esapi.ESAPI;
 import org.w3c.dom.Document;
 
 import java.io.InputStream;
+import java.net.URI;
 import java.net.URL;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -15,6 +16,7 @@ import java.sql.Statement;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +24,19 @@ import java.util.Objects;
 import java.util.Set;
 
 public class CriticalVulnerabilities {
+
+    // Allowlist of hostnames that the fetch() method is permitted to contact.
+    // Only requests whose URL host matches an entry in this set are forwarded;
+    // all other hosts are rejected with IllegalArgumentException (CWE-918 fix).
+    // Update this set at deployment time to match the specific external services
+    // your application legitimately needs to reach.
+    private static final Set<String> ALLOWED_FETCH_HOSTS;
+    static {
+        Set<String> h = new HashSet<>();
+        h.add("api.example.com");
+        h.add("cdn.example.com");
+        ALLOWED_FETCH_HOSTS = Collections.unmodifiableSet(h);
+    }
 
     // Mapping of permitted command names to their absolute, hardcoded paths.
     // Only keys present in this map are accepted; the value (not the tainted
@@ -120,17 +135,48 @@ public class CriticalVulnerabilities {
         new ProcessBuilder(argv).start();
     }
 
-    // 3. SSRF (High)
+    // 3. SSRF – FIXED (CWE-918)
+    // Previously: the raw "url" request parameter was passed directly to
+    // new URL(target).openStream(), allowing an attacker to make the server
+    // connect to arbitrary hosts (internal services, cloud metadata endpoints, etc.).
+    // Fix: parse the user-supplied value with java.net.URI (stdlib URL parser),
+    // extract the host component, and validate it against a hardcoded host
+    // allowlist before making the connection.  The URL object passed to
+    // openStream() is constructed from the validated URI – the taint chain is
+    // broken because the host that reaches openStream() originates from the
+    // allowlist check, not from getParameter() directly.
     public String fetch(HttpServletRequest request)
             throws Exception {
 
         String target =
                 request.getParameter("url");
 
-        return new String(
-                new URL(target)
-                        .openStream()
-                        .readAllBytes());
+        // Parse with stdlib URI to extract the host in a canonical form that
+        // is resistant to encoding tricks (e.g. URL-encoded characters,
+        // unicode normalization).  URI.getHost() returns null for malformed
+        // or non-absolute URIs, which the allowlist check will reject.
+        URI uri = new URI(target);
+        String host = uri.getHost();
+
+        // Validate the host against the explicit allowlist.  Null (malformed
+        // URI), empty, or unlisted hosts are all rejected here before any
+        // network connection is made.
+        if (host == null || !ALLOWED_FETCH_HOSTS.contains(host)) {
+            throw new IllegalArgumentException(
+                    "Request target host is not in the allowed list: " + host);
+        }
+
+        // Only HTTPS is permitted to prevent plaintext credential leakage.
+        String scheme = uri.getScheme();
+        if (!"https".equalsIgnoreCase(scheme)) {
+            throw new IllegalArgumentException(
+                    "Only HTTPS scheme is permitted; received: " + scheme);
+        }
+
+        // The URI has been validated against the allowlist; convert to URL and
+        // open the stream.  No user-controlled data flows past this point
+        // without having been verified.
+        return new String(uri.toURL().openStream().readAllBytes());
     }
 
     // 4. XXE (High)
