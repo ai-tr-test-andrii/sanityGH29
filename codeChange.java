@@ -4,18 +4,43 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import org.w3c.dom.Document;
 
 import java.io.InputStream;
+import java.net.URI;
 import java.net.URL;
 import java.security.MessageDigest;
+import java.util.Arrays;
+import java.util.List;
 
 public class InfrastructureVulns {
 
-    // 1. SSRF (High)
+    // Allowlist of hosts that the application is permitted to fetch from.
+    // Only add trusted, external-facing hostnames here.
+    private static final List<String> ALLOWED_HOSTS = Arrays.asList(
+            "trusted-api.example.com",
+            "cdn.example.com"
+    );
+
+    // 1. SSRF (High) — fixed by validating the host against an explicit allowlist
+    // before making the outbound request.
     public String fetchUrl(HttpServletRequest request) throws Exception {
 
         String target =
                 request.getParameter("url");
 
-        URL url = new URL(target);
+        // Parse with java.net.URI so that we can inspect the scheme and host
+        // without risk of confusion attacks (e.g. embedded credentials).
+        URI uri = new URI(target);
+
+        String scheme = uri.getScheme();
+        String host   = uri.getHost();
+
+        // Enforce HTTPS-only and validate against the allowlist before fetching.
+        if (!"https".equalsIgnoreCase(scheme) || host == null
+                || !ALLOWED_HOSTS.contains(host.toLowerCase())) {
+            throw new SecurityException(
+                    "Request to disallowed URL was blocked: " + scheme + "://" + host);
+        }
+
+        URL url = uri.toURL();
 
         return new String(
                 url.openStream().readAllBytes());
